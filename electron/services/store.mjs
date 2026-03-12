@@ -1,6 +1,5 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { safeStorage } from "electron";
 
 /** @typedef {{
  * id: string;
@@ -157,11 +156,11 @@ export function createStore(userDataPath) {
  */
 function hydrateSettings(rawSettings, envApiKey) {
   const next = rawSettings && typeof rawSettings === "object" ? { ...rawSettings } : {};
-  const encryptedKey = typeof next.claudeApiKeyEncrypted === "string" ? next.claudeApiKeyEncrypted : "";
   const legacyPlaintextKey = typeof next.claudeApiKey === "string" ? next.claudeApiKey.trim() : "";
   /** @type {'none' | 'env' | 'plaintext'} */
   let nextApiKeyStorage = "none";
-  let didRewriteSettings = false;
+  const didRewriteSettings = Object.prototype.hasOwnProperty.call(next, "claudeApiKeyEncrypted")
+    || Object.prototype.hasOwnProperty.call(next, "apiKeyStorage");
 
   delete next.claudeApiKeyEncrypted;
   delete next.apiKeyStorage;
@@ -169,18 +168,9 @@ function hydrateSettings(rawSettings, envApiKey) {
   if (envApiKey) {
     delete next.claudeApiKey;
     nextApiKeyStorage = "env";
-    didRewriteSettings = Boolean(encryptedKey || legacyPlaintextKey);
   } else if (legacyPlaintextKey) {
     next.claudeApiKey = legacyPlaintextKey;
     nextApiKeyStorage = "plaintext";
-  } else if (encryptedKey) {
-    try {
-      next.claudeApiKey = safeStorage.decryptString(Buffer.from(encryptedKey, "base64"));
-      nextApiKeyStorage = next.claudeApiKey ? "plaintext" : "none";
-    } catch {
-      next.claudeApiKey = undefined;
-    }
-    didRewriteSettings = true;
   } else {
     next.claudeApiKey = undefined;
   }

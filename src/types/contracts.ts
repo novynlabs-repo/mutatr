@@ -67,6 +67,7 @@ export type RenderRecord = {
   changedFileContents?: Record<string, string | null>;
   attentionAnchors?: AttentionAnchor[];
   mobileAttentionAnchors?: AttentionAnchor[];
+  errorMessage?: string;
 };
 
 export type ScoreMetricKey =

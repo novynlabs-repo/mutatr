@@ -1002,6 +1002,16 @@ html, body, #root {
   color: oklch(0.85 0 0);
 }
 
+.render-card .render-card-error {
+  font-size: 0.7rem;
+  line-height: 1.45;
+  color: oklch(0.76 0.07 26);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .render-grid .empty-state {
   grid-column: 1 / -1;
 }
@@ -1601,8 +1611,8 @@ html, body, #root {
 }
 
 .variant-overview-card.active {
-  border-color: oklch(0.72 0.12 210 / 0.65);
-  background: linear-gradient(180deg, oklch(0.24 0.03 240 / 0.9), oklch(0.17 0.01 0 / 0.92));
+  border-color: oklch(1 0 0 / 16%);
+  background: linear-gradient(180deg, oklch(1 0 0 / 5%), oklch(1 0 0 / 3%));
 }
 
 .variant-overview-head {
@@ -1621,7 +1631,7 @@ html, body, #root {
 .variant-overview-score {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 1.1rem;
-  color: oklch(0.86 0.08 205);
+  color: oklch(0.86 0 0);
 }
 
 .variant-overview-meta {
@@ -1673,21 +1683,21 @@ html, body, #root {
 }
 
 .score-badge.win {
-  background: oklch(0.42 0.11 155 / 0.18);
-  color: oklch(0.82 0.13 155);
-  border-color: oklch(0.62 0.12 155 / 0.35);
+  background: oklch(1 0 0 / 7%);
+  color: oklch(0.76 0 0);
+  border-color: oklch(1 0 0 / 12%);
 }
 
 .score-badge.mixed {
-  background: oklch(0.42 0.08 88 / 0.16);
-  color: oklch(0.88 0.09 88);
-  border-color: oklch(0.72 0.1 88 / 0.35);
+  background: oklch(1 0 0 / 7%);
+  color: oklch(0.76 0 0);
+  border-color: oklch(1 0 0 / 12%);
 }
 
 .score-badge.risk {
-  background: oklch(0.42 0.14 25 / 0.16);
-  color: oklch(0.84 0.15 25);
-  border-color: oklch(0.7 0.14 25 / 0.35);
+  background: oklch(1 0 0 / 7%);
+  color: oklch(0.76 0 0);
+  border-color: oklch(1 0 0 / 12%);
 }
 
 .scorecard-topline,
@@ -1738,9 +1748,9 @@ html, body, #root {
 .goal-chip {
   padding: 7px 10px;
   border-radius: 999px;
-  background: oklch(0.72 0.12 210 / 0.12);
-  border: 1px solid oklch(0.72 0.12 210 / 0.24);
-  color: oklch(0.88 0.04 210);
+  background: oklch(1 0 0 / 6%);
+  border: 1px solid oklch(1 0 0 / 10%);
+  color: oklch(0.72 0 0);
   font-size: 0.72rem;
   font-weight: 500;
 }
@@ -1813,7 +1823,7 @@ html, body, #root {
 .metric-bar-fill {
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, oklch(0.54 0.08 210), oklch(0.78 0.11 180));
+  background: linear-gradient(90deg, oklch(0.58 0 0), oklch(0.78 0 0));
 }
 
 .metric-delta {
@@ -1823,11 +1833,11 @@ html, body, #root {
 }
 
 .metric-delta.positive {
-  color: oklch(0.8 0.12 155);
+  color: oklch(0.74 0 0);
 }
 
 .metric-delta.negative {
-  color: oklch(0.8 0.14 25);
+  color: oklch(0.74 0 0);
 }
 
 .metric-card p {
@@ -1866,7 +1876,7 @@ html, body, #root {
 .goal-focus-score strong {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 1.3rem;
-  color: oklch(0.88 0.08 205);
+  color: oklch(0.88 0 0);
 }
 
 .goal-focus-score span {
@@ -1912,7 +1922,7 @@ html, body, #root {
 .issue-card span {
   display: block;
   margin-top: 8px;
-  color: oklch(0.68 0.04 180);
+  color: oklch(0.64 0 0);
   font-size: 0.75rem;
   line-height: 1.5;
 }
@@ -1958,7 +1968,7 @@ html, body, #root {
 }
 
 .persona-score-row.active {
-  border-color: oklch(0.72 0.12 210 / 0.45);
+  border-color: oklch(1 0 0 / 14%);
 }
 
 .persona-score-row div {

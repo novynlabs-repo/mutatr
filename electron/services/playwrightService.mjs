@@ -428,20 +428,65 @@ async function prepareRenderedPage(page, input) {
 async function captureView(page, input) {
   await page.setViewportSize(input.viewport);
   await page.emulateMedia({ media: "screen" });
-  await waitForRenderableContent(page, input.isMobile ? 7000 : 5000);
 
   /** @type {import('./types.mjs').AttentionAnchor[]} */
   let attentionAnchors = [];
+
+  for (let attempt = 0; attempt < RECOVERABLE_RENDER_PASSES; attempt += 1) {
+    await waitForRenderableContent(page, input.isMobile ? 7000 : 5000);
+
+    const recoverableIssue = await detectRecoverableRenderIssue(page);
+    if (recoverableIssue) {
+      if (attempt === RECOVERABLE_RENDER_PASSES - 1) {
+        throw new Error(recoverableIssue);
+      }
+      await recoverCaptureState(page, attempt);
+      continue;
+    }
+
+    attentionAnchors = await collectAttentionAnchors(page, input.isMobile);
+    if (attentionAnchors.length > 0 || attempt === RECOVERABLE_RENDER_PASSES - 1) {
+      break;
+    }
+
+    await recoverCaptureState(page, attempt);
+  }
+
+  await page.screenshot({ path: input.filePath, fullPage: true });
+  return { attentionAnchors };
+}
+
+/**
+ * @param {import('playwright').Page} page
+ * @param {boolean} isMobile
+ */
+async function collectAttentionAnchors(page, isMobile) {
+  /** @type {import('./types.mjs').AttentionAnchor[]} */
+  let attentionAnchors = [];
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    await page.waitForTimeout((input.isMobile ? 250 : 180) + attempt * 220);
+    await page.waitForTimeout((isMobile ? 250 : 180) + attempt * 220);
     attentionAnchors = await extractAttentionAnchors(page);
     if (attentionAnchors.length > 0) {
       break;
     }
   }
+  return attentionAnchors;
+}
 
-  await page.screenshot({ path: input.filePath, fullPage: true });
-  return { attentionAnchors };
+/**
+ * @param {import('playwright').Page} page
+ * @param {number} attempt
+ */
+async function recoverCaptureState(page, attempt) {
+  await page.waitForTimeout(700 + attempt * 500);
+
+  const currentUrl = page.url();
+  if (!currentUrl || currentUrl === "about:blank") {
+    return;
+  }
+
+  await page.reload({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
+  await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
 }
 
 /**

@@ -12,8 +12,8 @@
     "dev:renderer": "vite --strictPort --host 127.0.0.1 --port 5173",
     "build": "npm run build:renderer",
     "build:renderer": "vite build",
-    "package": "npm run build:renderer && node ./scripts/run-electron-builder-mac.mjs --dir",
-    "dist": "npm run build:renderer && node ./scripts/run-electron-builder-mac.mjs && node ./scripts/write-checksums.mjs",
+    "package": "npm run build:renderer && node ./scripts/sync-runtime-node.mjs && node ./scripts/run-electron-builder-mac.mjs --dir",
+    "dist": "npm run build:renderer && node ./scripts/sync-runtime-node.mjs && node ./scripts/run-electron-builder-mac.mjs && node ./scripts/write-checksums.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test:e2e": "node ./e2e/run-e2e.mjs",
@@ -77,6 +77,15 @@
       "electron/**/*",
       "public/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/runtime",
+        "to": "runtime",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "asar": true,
     "mac": {

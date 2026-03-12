@@ -1235,6 +1235,11 @@ export default function App() {
                                   <div className="thumb-fallback" />
                                 )}
                                 <span>{render.title}</span>
+                                {render.errorMessage ? (
+                                  <small className="render-card-error" title={render.errorMessage}>
+                                    {render.errorMessage}
+                                  </small>
+                                ) : null}
                               </label>
                             );
                           })}

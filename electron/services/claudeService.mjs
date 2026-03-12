@@ -1,8 +1,12 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import crypto from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+
+const require = createRequire(import.meta.url);
 
 const SCORE_METRICS = [
   ["messageClarity", "Message clarity"],
@@ -29,9 +33,49 @@ const SCORE_METRICS = [
  * additionalDirectories?: string[];
  * model?: string;
  * onMessage?: (text: string) => void;
+ * retryCount?: number;
  * }} input
  */
 async function runClaude(input) {
+  const retryCount = Number.isInteger(input.retryCount) ? Math.max(0, input.retryCount) : 2;
+  /** @type {Error | null} */
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    try {
+      return await runClaudeOnce(input);
+    } catch (error) {
+      const normalizedError = normalizeClaudeError(error);
+      lastError = normalizedError;
+
+      if (attempt >= retryCount || !isRetryableClaudeError(normalizedError)) {
+        throw normalizedError;
+      }
+
+      const waitMs = retryDelayMs(attempt);
+      input.onMessage?.(`\n[retry ${attempt + 1}/${retryCount}] ${normalizedError.message}\n`);
+      await sleep(waitMs);
+    }
+  }
+
+  throw lastError ?? new Error("Claude query failed.");
+}
+
+/**
+ * @param {{
+ * cwd: string;
+ * prompt: string;
+ * schema?: Record<string, unknown>;
+ * apiKey?: string;
+ * permissionMode?: import('@anthropic-ai/claude-agent-sdk').PermissionMode;
+ * maxTurns?: number;
+ * systemAppend?: string;
+ * additionalDirectories?: string[];
+ * model?: string;
+ * onMessage?: (text: string) => void;
+ * }} input
+ */
+async function runClaudeOnce(input) {
   const {
     cwd,
     prompt,
@@ -47,6 +91,8 @@ async function runClaude(input) {
 
   /** @type {import('@anthropic-ai/claude-agent-sdk').SDKResultMessage | null} */
   let resultMessage = null;
+  const claudeHostExecutable = resolveClaudeHostExecutable();
+  const claudeCodePath = resolveClaudeCodeExecutable();
 
   const options = {
     cwd,
@@ -64,10 +110,9 @@ async function runClaude(input) {
     includePartialMessages: true,
     settingSources: ["project"],
     model,
-    env: {
-      ...process.env,
-      ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}),
-    },
+    executable: claudeHostExecutable,
+    ...(claudeCodePath ? { pathToClaudeCodeExecutable: claudeCodePath } : {}),
+    env: buildClaudeProcessEnv(cwd, apiKey, claudeHostExecutable),
   };
 
   const stream = query({ prompt, options });
@@ -86,13 +131,201 @@ async function runClaude(input) {
   }
 
   if (resultMessage.subtype !== "success") {
-    throw new Error(resultMessage.errors?.join("\n") || "Claude query failed.");
+    throw new Error(formatClaudeFailure(resultMessage));
   }
 
   return {
     text: resultMessage.result,
     structured: resultMessage.structured_output,
   };
+}
+
+/**
+ * Finder-launched macOS apps often inherit a minimal PATH that omits Homebrew
+ * and Node toolchain shims. Claude Code needs a Node-compatible executable plus
+ * access to common shell tools even when the desktop app was launched outside a
+ * terminal.
+ *
+ * @param {string} cwd
+ * @param {string | undefined} apiKey
+ * @param {string | undefined} executable
+ */
+function buildClaudeProcessEnv(cwd, apiKey, executable) {
+  const homeDir = os.homedir();
+  const pathEntries = [
+    path.join(cwd, "node_modules", ".bin"),
+    ...(process.env.PATH ? process.env.PATH.split(path.delimiter) : []),
+    path.join(homeDir, ".volta", "bin"),
+    path.join(homeDir, ".asdf", "shims"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ].filter(Boolean);
+
+  return {
+    ...process.env,
+    ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}),
+    PATH: [...new Set(pathEntries)].join(path.delimiter),
+    ...(shouldUseElectronNodeFallback(executable) ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+  };
+}
+
+function resolveClaudeHostExecutable() {
+  if (!process.versions.electron) {
+    return process.execPath;
+  }
+
+  const bundledNodePath = resolveBundledNodeExecutable();
+  if (bundledNodePath) {
+    return bundledNodePath;
+  }
+
+  const homeDir = os.homedir();
+  const candidates = [
+    process.env.MUTATR_NODE_EXECUTABLE,
+    process.env.CLAUDE_NODE_EXECUTABLE,
+    path.join(homeDir, ".volta", "bin", "node"),
+    path.join(homeDir, ".asdf", "shims", "node"),
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    "/usr/bin/node",
+    ...resolveNvmNodeCandidates(homeDir),
+    process.execPath,
+  ].filter((value) => typeof value === "string" && value.length > 0);
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return process.execPath;
+}
+
+function resolveBundledNodeExecutable() {
+  const candidates = [
+    path.join(process.resourcesPath || "", "runtime", "bin", "node"),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Prefer a real Node install over the Electron app binary. Spawning the app
+ * binary with ELECTRON_RUN_AS_NODE works, but on macOS it can surface dock
+ * icons/windows for each Claude worker process.
+ *
+ * @param {string} homeDir
+ */
+function resolveNvmNodeCandidates(homeDir) {
+  const versionsDir = path.join(homeDir, ".nvm", "versions", "node");
+
+  try {
+    return readdirSync(versionsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }))
+      .map((version) => path.join(versionsDir, version, "bin", "node"));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * @param {string | undefined} executable
+ */
+function shouldUseElectronNodeFallback(executable) {
+  return Boolean(process.versions.electron) && Boolean(executable) && executable === process.execPath;
+}
+
+function resolveClaudeCodeExecutable() {
+  try {
+    return require.resolve("@anthropic-ai/claude-agent-sdk/cli.js");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * @param {unknown} error
+ */
+function normalizeClaudeError(error) {
+  if (error instanceof Error) return error;
+  return new Error(String(error ?? "Claude query failed."));
+}
+
+/**
+ * @param {Error} error
+ */
+function isRetryableClaudeError(error) {
+  const message = String(error.message || "").toLowerCase();
+  if (!message) return true;
+
+  const retryableSnippets = [
+    "claude query failed",
+    "no result returned by claude agent sdk",
+    "rate limit",
+    "overloaded",
+    "temporarily unavailable",
+    "internal error",
+    "timed out",
+    "timeout",
+    "network",
+    "econnreset",
+    "socket hang up",
+    "stream closed",
+    "connection reset",
+  ];
+
+  return retryableSnippets.some((snippet) => message.includes(snippet));
+}
+
+/**
+ * @param {import('@anthropic-ai/claude-agent-sdk').SDKResultMessage | null} resultMessage
+ */
+function formatClaudeFailure(resultMessage) {
+  const joinedErrors = Array.isArray(resultMessage?.errors)
+    ? resultMessage.errors.filter((value) => typeof value === "string" && value.trim()).join("\n")
+    : "";
+  if (joinedErrors) {
+    return joinedErrors;
+  }
+
+  const resultText =
+    resultMessage && typeof resultMessage.result === "string" ? resultMessage.result.trim() : "";
+  if (resultText) {
+    return resultText;
+  }
+
+  if (resultMessage?.subtype) {
+    return `Claude query failed (${resultMessage.subtype}).`;
+  }
+
+  return "Claude query failed.";
+}
+
+/**
+ * @param {number} attempt
+ */
+function retryDelayMs(attempt) {
+  const delays = [1500, 4000, 8000];
+  return delays[Math.min(attempt, delays.length - 1)];
+}
+
+/**
+ * @param {number} ms
+ */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -385,7 +618,12 @@ export async function implementTest(input) {
     "",
     "Constraints:",
     "- Keep existing design language and coding style.",
-    "- Apply a variant implementation directly in project files.",
+    "- Make the smallest viable change that satisfies the variant.",
+    "- Prefer editing existing files over creating new files.",
+    "- Read the primary page file first, then only the directly relevant imported components.",
+    "- Do not scan node_modules, generated files, or unrelated routes.",
+    "- Do not run build, test, lint, install, or package commands.",
+    "- Apply the implementation directly in project files and stop once the edits are written.",
     "- Do not break TypeScript or build config.",
     "- Return structured output with summary and changed file list.",
     "- Every changed file path must be repo-relative (for example: src/app/page.tsx).",
@@ -399,9 +637,9 @@ export async function implementTest(input) {
     apiKey,
     model,
     permissionMode: "acceptEdits",
-    maxTurns: 18,
+    maxTurns: 24,
     systemAppend:
-      "You are implementing code changes directly. Make concrete edits; do not just describe them.",
+      "You are implementing code changes directly. Make concrete edits, avoid repository-wide exploration, and do not run verification commands after editing.",
     additionalDirectories: [projectRoot],
     onMessage,
   });

@@ -2,7 +2,6 @@ import { app, BrowserWindow, dialog, ipcMain, nativeImage } from "electron";
 import path from "node:path";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
-import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createStore } from "./services/store.mjs";
@@ -14,7 +13,6 @@ import {
 import {
   suggestPersonas,
   suggestTests,
-  implementTest,
   predictAttentionBoxes,
   analyzeVariantScorecard,
 } from "./services/claudeService.mjs";
@@ -24,6 +22,7 @@ import {
   renderVariant,
 } from "./services/playwrightService.mjs";
 import { DEFAULT_MODELS, normalizeModel } from "./services/modelPreferences.mjs";
+import { implementVariantInTempProject } from "./services/variantImplementation.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -418,65 +417,36 @@ function registerIpc() {
       const imageDir = getProjectImageDir(project.rootPath);
       const modelPrefs = getModelPreferences();
 
-      // Phase 1: Run all implementations in parallel, each on its own temp copy
-      const implResults = await Promise.all(
-        selectedTests.map(async (test, i) => {
-          const tempRoot = path.join(os.tmpdir(), `mutatr-impl-${crypto.randomUUID().slice(0, 8)}`);
-          const lineId = `impl-${test.id}`;
-          sendProgress(lineId, `Implementing: ${test.title}`, "running");
-          try {
-            await copyProjectLight(project.rootPath, tempRoot);
-            const pageFilePath = normalizeProjectRelativePath(page.filePath, project.rootPath);
-            if (!pageFilePath) {
-              throw new Error(`Selected page is outside the imported project: ${page.filePath}`);
-            }
-            const impl = await implementTest({
-              projectRoot: tempRoot,
-              page: {
-                ...page,
-                filePath: pageFilePath,
-              },
-              test,
-              apiKey: getClaudeApiKey(),
-              model: modelPrefs.implementationModel,
-              onMessage: (text) => sendProgress(lineId, `Implementing: ${test.title}`, "running", text),
-            });
-            const normalizedChangedFiles = normalizeChangedFiles(impl.changedFiles, tempRoot);
-            const detectedProjectChanges = await detectProjectFileChanges(project.rootPath, tempRoot);
-            const detectedChangedFiles = uniquePaths([
-              ...detectedProjectChanges.changedFiles,
-              ...detectedProjectChanges.deletedFiles,
-            ]);
-            if (!detectedChangedFiles.length) {
-              if (normalizedChangedFiles.rejected.length > 0) {
-                throw new Error(
-                  `Implementation reported unsafe file paths and produced no detectable project edits: ${normalizedChangedFiles.rejected.slice(0, 3).join(", ")}`
-                );
-              }
-              if (normalizedChangedFiles.normalized.length > 0) {
-                throw new Error(
-                  `Implementation reported changed files but produced no detectable project edits: ${normalizedChangedFiles.normalized.slice(0, 3).join(", ")}`
-                );
-              }
-              throw new Error("Implementation did not produce any detectable file changes inside the project copy.");
-            }
-            sendProgress(lineId, `Implementing: ${test.title}`, "done");
-            return {
-              test,
-              impl: {
-                ...impl,
-                changedFiles: detectedChangedFiles,
-              },
-              tempRoot,
-              ok: true,
-            };
-          } catch (error) {
-            console.error(error);
-            sendProgress(lineId, `Implementing: ${test.title}`, "error");
-            return { test, impl: null, tempRoot, ok: false };
-          }
-        })
-      );
+      // Phase 1: Run implementations sequentially so one noisy agent run does not
+      // destabilize the others or amplify rate/turn-limit failures.
+      /** @type {Array<{test:any; impl:any; tempRoot:string; ok:boolean; recoveredFromError?: boolean; errorMessage?: string}>} */
+      const implResults = [];
+      for (const test of selectedTests) {
+        const lineId = `impl-${test.id}`;
+        sendProgress(lineId, `Implementing: ${test.title}`, "running");
+        try {
+          const result = await implementVariantInTempProject({
+            projectRoot: project.rootPath,
+            page,
+            test,
+            apiKey: getClaudeApiKey(),
+            model: modelPrefs.implementationModel,
+            onMessage: (text) => sendProgress(lineId, `Implementing: ${test.title}`, "running", text),
+          });
+          sendProgress(lineId, `Implementing: ${test.title}`, "done");
+          implResults.push(result);
+        } catch (error) {
+          console.error(error);
+          sendProgress(lineId, `Implementing: ${test.title}`, "error");
+          implResults.push({
+            test,
+            impl: null,
+            tempRoot: "",
+            ok: false,
+            errorMessage: error instanceof Error ? error.message : "Implementation failed.",
+          });
+        }
+      }
 
       // Phase 2: Render variants sequentially from each isolated temp copy.
       /** @type {import('./services/types.mjs').RenderRecord[]} */
@@ -519,6 +489,7 @@ function registerIpc() {
               changedFileContents,
               attentionAnchors: capture.attentionAnchors,
               mobileAttentionAnchors: capture.mobileAttentionAnchors,
+              errorMessage: result.recoveredFromError ? result.errorMessage : undefined,
             });
             sendProgress(renderLineId, `Rendering: ${result.test.title}`, "done");
           } catch (error) {
@@ -531,6 +502,7 @@ function registerIpc() {
               screenshotDataUrl: page.thumbnailDataUrl,
               mobileScreenshotDataUrl: page.mobileScreenshotDataUrl,
               changedFiles: [],
+              errorMessage: error instanceof Error ? error.message : "Render failed.",
             });
             sendProgress(renderLineId, `Rendering: ${result.test.title}`, "error");
           }
@@ -543,6 +515,7 @@ function registerIpc() {
             screenshotDataUrl: page.thumbnailDataUrl,
             mobileScreenshotDataUrl: page.mobileScreenshotDataUrl,
             changedFiles: [],
+            errorMessage: result.errorMessage || "Implementation failed.",
           });
           sendProgress(renderLineId, `Rendering: ${result.test.title}`, "error");
         }
@@ -550,7 +523,9 @@ function registerIpc() {
 
       // Phase 3: Cleanup temp copies
       for (const result of implResults) {
-        fs.rm(result.tempRoot, { recursive: true, force: true }).catch(() => {});
+        if (result.tempRoot) {
+          fs.rm(result.tempRoot, { recursive: true, force: true }).catch(() => {});
+        }
       }
 
       experiment.renders = renders;
@@ -1395,46 +1370,6 @@ function slugify(input) {
     .slice(0, 60);
 }
 
-const COPY_EXCLUDE = new Set(["node_modules", ".git", "dist", "build", ".next", ".cache", ".turbo"]);
-
-/**
- * Lightweight project copy: skips heavy dirs (no node_modules, no .git).
- * Used only for Claude agent edits — no bundler will run here.
- * @param {string} src
- * @param {string} dest
- */
-async function copyProjectLight(src, dest) {
-  await fs.cp(src, dest, {
-    recursive: true,
-    filter: (source) => !COPY_EXCLUDE.has(path.basename(source)),
-  });
-  await linkSharedDirectory(src, dest, "node_modules");
-}
-
-/**
- * Link a shared dependency directory into the temp project copy so
- * the renderer can boot without mutating the user's real project.
- * @param {string} srcRoot
- * @param {string} destRoot
- * @param {string} dirName
- */
-async function linkSharedDirectory(srcRoot, destRoot, dirName) {
-  const sourceDir = path.join(srcRoot, dirName);
-  const destDir = path.join(destRoot, dirName);
-
-  try {
-    const stat = await fs.lstat(sourceDir);
-    if (!stat.isDirectory() && !stat.isSymbolicLink()) {
-      return;
-    }
-  } catch {
-    return;
-  }
-
-  await fs.rm(destDir, { recursive: true, force: true }).catch(() => {});
-  await fs.symlink(sourceDir, destDir, process.platform === "win32" ? "junction" : "dir");
-}
-
 /**
  * @param {string | undefined | null} candidatePath
  * @param {string} allowedRoot
@@ -1454,31 +1389,6 @@ function normalizeProjectRelativePath(candidatePath, allowedRoot) {
   }
 
   return rel.split(path.sep).join("/");
-}
-
-/**
- * @param {string[] | undefined} changedFiles
- * @param {string} allowedRoot
- */
-function normalizeChangedFiles(changedFiles, allowedRoot) {
-  /** @type {string[]} */
-  const normalized = [];
-  /** @type {string[]} */
-  const rejected = [];
-  const seen = new Set();
-
-  for (const entry of changedFiles ?? []) {
-    const rel = normalizeProjectRelativePath(entry, allowedRoot);
-    if (!rel) {
-      rejected.push(String(entry ?? ""));
-      continue;
-    }
-    if (seen.has(rel)) continue;
-    seen.add(rel);
-    normalized.push(rel);
-  }
-
-  return { normalized, rejected };
 }
 
 /**
@@ -1510,79 +1420,4 @@ function maskApiKey(key) {
   if (!key) return "";
   if (key.length <= 10) return "*".repeat(key.length);
   return `${key.slice(0, 6)}...${key.slice(-4)}`;
-}
-
-/**
- * Compare the edited temp copy with the imported project so the renderer relies
- * on the file delta that actually happened, not just the model-reported list.
- *
- * @param {string} sourceRoot
- * @param {string} editedRoot
- */
-async function detectProjectFileChanges(sourceRoot, editedRoot) {
-  const [sourceFiles, editedFiles] = await Promise.all([
-    buildProjectFileHashMap(sourceRoot),
-    buildProjectFileHashMap(editedRoot),
-  ]);
-
-  /** @type {string[]} */
-  const changedFiles = [];
-  /** @type {string[]} */
-  const deletedFiles = [];
-  const allPaths = [...new Set([...sourceFiles.keys(), ...editedFiles.keys()])].sort();
-
-  for (const rel of allPaths) {
-    const sourceHash = sourceFiles.get(rel);
-    const editedHash = editedFiles.get(rel);
-    if (sourceHash === editedHash) continue;
-    if (editedHash === undefined) {
-      deletedFiles.push(rel);
-    } else {
-      changedFiles.push(rel);
-    }
-  }
-
-  return { changedFiles, deletedFiles };
-}
-
-/**
- * @param {string} root
- */
-async function buildProjectFileHashMap(root) {
-  /** @type {Map<string, string>} */
-  const files = new Map();
-  await walkProjectFiles(root, "", files);
-  return files;
-}
-
-/**
- * @param {string} root
- * @param {string} relDir
- * @param {Map<string, string>} files
- */
-async function walkProjectFiles(root, relDir, files) {
-  const dir = relDir ? path.join(root, relDir) : root;
-  const entries = await fs.readdir(dir, { withFileTypes: true });
-
-  for (const entry of entries) {
-    if (COPY_EXCLUDE.has(entry.name)) continue;
-    const relPath = relDir ? path.posix.join(relDir, entry.name) : entry.name;
-    const fullPath = path.join(dir, entry.name);
-
-    if (entry.isDirectory()) {
-      await walkProjectFiles(root, relPath, files);
-      continue;
-    }
-    if (!entry.isFile()) continue;
-
-    const raw = await fs.readFile(fullPath);
-    files.set(relPath, crypto.createHash("sha1").update(raw).digest("hex"));
-  }
-}
-
-/**
- * @param {string[]} paths
- */
-function uniquePaths(paths) {
-  return [...new Set(paths.filter((value) => typeof value === "string" && value.trim()))];
 }

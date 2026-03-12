@@ -66,6 +66,7 @@
  * changedFileContents?: Record<string, string|null>;
  * attentionAnchors?: AttentionAnchor[];
  * mobileAttentionAnchors?: AttentionAnchor[];
+ * errorMessage?: string;
  * }} RenderRecord
  */
 
