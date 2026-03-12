@@ -1,11 +1,3 @@
-<p align="center">
-  <img src="mutatr_logo.png" alt="mutatr logo" width="132" />
-</p>
-
-<p align="center">
-  <img src="public/mutatr-header.png" alt="mutatr" width="100%" />
-</p>
-
 <h1 align="center">mutatr</h1>
 
 <p align="center">
